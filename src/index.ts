@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from 'zod';
 import { get_encoding } from 'tiktoken';
-import express from 'express';
+import express, { Request, Response } from 'express'; // RequestとResponseをインポート
 
 import { fetchSuggest, fetchRouteSearch } from './fetcher.js';
 import { parseRouteSearchResult } from './parser.js';
@@ -379,7 +379,7 @@ mcpServer.tool("search_route_by_station_name",
 
 // 3. Expressのエンドポイントを設定
 // POSTリクエストをtransport.handleRequestで処理
-app.post("/mcp", async (req, res) => {
+app.post("/mcp", async (req: Request, res: Response) => { // 型を追加
     console.log("Received MCP request:", req.body);
     try {
         await transport.handleRequest(req, res, req.body);
@@ -399,7 +399,7 @@ app.post("/mcp", async (req, res) => {
 });
 
 // GETリクエストはn8nなどのクライアントからのツール一覧取得リクエストに対応するために修正
-app.get("/mcp", async (req, res) => {
+app.get("/mcp", async (req: Request, res: Response) => { // 型を追加
     console.log("Received GET MCP request for tool discovery.");
     try {
         // サーバーに登録されているツールのリストを取得
@@ -420,8 +420,8 @@ app.get("/mcp", async (req, res) => {
             result: {
                 tools: tools,
             },
-            // GETリクエストにはIDがないためnullを設定
-            id: null,
+            // クライアントのバリデーションエラーを回避するため、nullの代わりに固定の文字列IDを設定
+            id: "n8n-discovery-request",
         });
     } catch (error) {
         console.error("Error handling GET request:", error);
@@ -438,7 +438,7 @@ app.get("/mcp", async (req, res) => {
 
 
 // DELETEリクエストも互換性のために405を返す
-app.delete("/mcp", async (req, res) => {
+app.delete("/mcp", async (req: Request, res: Response) => { // 型を追加
     console.log("Received DELETE MCP request");
     res.status(405).json({
         jsonrpc: "2.0",
