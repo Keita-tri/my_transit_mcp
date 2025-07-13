@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { createServer } from 'http';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from 'zod';
 import { get_encoding } from 'tiktoken';
+import express from 'express';
 
 import { fetchSuggest, fetchRouteSearch } from './fetcher.js';
 import { parseRouteSearchResult } from './parser.js';
@@ -12,13 +14,21 @@ const encoder = get_encoding('cl100k_base');
 const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 const host = process.env.HOST || '0.0.0.0';
 
-const server = new McpServer({
+// Expressアプリケーションの初期化
+const app = express();
+app.use(express.json()); // JSONボディパーサーを使用
+
+// 1. StreamableHTTPServerTransportのインスタンスを作成
+// ステートレスサーバーとして実装するため、sessionIdGeneratorはundefinedにします
+const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+});
+
+// MCPサーバーのインスタンスを作成
+const mcpServer = new McpServer({
     name: "japan-transfer-mcp",
     version: "0.1.0"
 });
-
-// ツールハンドラを自前で管理するMap
-const toolHandlers = new Map<string, Function>();
 
 /**
  * 経路検索結果を自然な文章形式でフォーマットする
@@ -56,7 +66,7 @@ function formatRouteSearchResponse(result: any, searchUrl: string, from: string,
             basicInfo.push(`🔄 乗換: ${route.transfers}回`);
         }
         if (route.fareInfo?.total) {
-            basicInfo.push(`💰 運賃: ${route.fareInfo.total.toLocaleString()}円`);
+            basicInfo.push(`� 運賃: ${route.fareInfo.total.toLocaleString()}円`);
         }
         if (route.totalDistance) {
             basicInfo.push(`📏 距離: ${route.totalDistance}km`);
@@ -257,20 +267,18 @@ const searchStationHandler = async (
         };
     }
 };
-server.registerTool("search_station_by_name",
+
+// 2. mcpServer.tool() を使用してツールを登録
+mcpServer.tool("search_station_by_name",
+    "Search for stations by name",
     {
-        title: "Search for stations by name",
-        description: "Search for stations by name",
-        inputSchema: {
-            query: z.string().describe("The name of the station to search for (must be in Japanese)"),
-            maxTokens: z.number().optional().describe("The maximum number of tokens to return"),
-            onlyName: z.boolean().optional().describe("Whether to only return the name of the station. If you do not need detailed information, it is generally recommended to set this to true."),
-        }
+        query: z.string().describe("The name of the station to search for (must be in Japanese)"),
+        maxTokens: z.number().optional().describe("The maximum number of tokens to return"),
+        onlyName: z.boolean().optional().describe("Whether to only return the name of the station. If you do not need detailed information, it is generally recommended to set this to true."),
     },
     searchStationHandler
 );
-toolHandlers.set("search_station_by_name", searchStationHandler);
-console.log('toolHandlers after search_station_by_name:', Array.from(toolHandlers.keys()));
+
 
 // search_route_by_station_name
 const searchRouteHandler = async (
@@ -356,74 +364,131 @@ const searchRouteHandler = async (
         };
     }
 };
-server.registerTool("search_route_by_station_name",
+
+mcpServer.tool("search_route_by_station_name",
+    "Search for routes by station name",
     {
-        title: "Search for routes by station name",
-        description: "Search for routes by station name",
-        inputSchema: {
-            from: z.string().describe("The name of the departure station. The value must be a name obtained from search_station_by_name."),
-            to: z.string().describe("The name of the arrival station. The value must be a name obtained from search_station_by_name."),
-            datetimeType: z.enum(["departure", "arrival","first","last"]).describe("The type of datetime to use for the search"),
-            datetime: z.string().optional().describe("The datetime to use for the search. Format: YYYY-MM-DD HH:MM:SS. If not provided, the current time in Japan will be used."),
-            maxTokens: z.number().optional().describe("The maximum number of tokens to return"),
-        },
+        from: z.string().describe("The name of the departure station. The value must be a name obtained from search_station_by_name."),
+        to: z.string().describe("The name of the arrival station. The value must be a name obtained from search_station_by_name."),
+        datetimeType: z.enum(["departure", "arrival","first","last"]).describe("The type of datetime to use for the search"),
+        datetime: z.string().optional().describe("The datetime to use for the search. Format: YYYY-MM-DD HH:MM:SS. If not provided, the current time in Japan will be used."),
+        maxTokens: z.number().optional().describe("The maximum number of tokens to return"),
     },
     searchRouteHandler
 );
-toolHandlers.set("search_route_by_station_name", searchRouteHandler);
-console.log('toolHandlers after search_route_by_station_name:', Array.from(toolHandlers.keys()));
 
-// HTTPサーバーの作成
-const httpServer = createServer();
-
-// HTTPサーバーをMCPサーバーにバインド
-httpServer.on('request', async (req: any, res: any) => {
-    if (req.method === 'POST') {
-        try {
-            const buffers = [];
-            for await (const chunk of req) {
-                buffers.push(chunk);
-            }
-            const body = Buffer.concat(buffers).toString();
-            const request = JSON.parse(body);
-
-            const toolName = request.tool;
-            const input = request.input;
-
-            // デバッグ出力
-            console.log('Received toolName:', toolName);
-            console.log('Current toolHandlers keys:', Array.from(toolHandlers.keys()));
-
-            // Mapからハンドラを取得
-            const handler = toolHandlers.get(toolName);
-            if (!toolName || !handler) {
-                res.writeHead(400, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: 'Unknown tool' }));
-                return;
-            }
-            const result = await handler(input);
-
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(result));
-        } catch (error) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: String(error) }));
+// 3. Expressのエンドポイントを設定
+// POSTリクエストをtransport.handleRequestで処理
+app.post("/mcp", async (req, res) => {
+    console.log("Received MCP request:", req.body);
+    try {
+        await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+        console.error("Error handling MCP request:", error);
+        if (!res.headersSent) {
+            res.status(500).json({
+                jsonrpc: "2.0",
+                error: {
+                    code: -32603,
+                    message: "Internal server error",
+                },
+                id: null,
+            });
         }
-    } else {
-        res.writeHead(405, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Method Not Allowed' }));
     }
 });
 
-// サーバーの起動
-httpServer.listen(port, host, () => {
-    console.log(`MCP Server is running at http://${host}:${port}`);
-    console.log('サーバーのプロパティ一覧:', Object.keys(server));
-    // @ts-ignore
-    const registeredTools = server['_registeredTools'];
-    if (registeredTools) {
-        console.log('registeredTools keys:', Object.keys(registeredTools));
-    } else {
-        console.log('registeredTools: undefined');
+// GETリクエストはn8nなどのクライアントからのツール一覧取得リクエストに対応するために修正
+app.get("/mcp", async (req, res) => {
+    console.log("Received GET MCP request for tool discovery.");
+    try {
+        // サーバーに登録されているツールのリストを取得
+        // 'getTools'の代わりに内部プロパティ'_registeredTools'を使用
+        const registeredTools = (mcpServer as any)['_registeredTools'] || {};
+        const tools = Object.values(registeredTools).map((tool: any) => ({
+            name: tool.name,
+            description: tool.description,
+            // 注意: inputSchemaをJSON Schema形式に変換する必要がある場合がある
+            // zod-to-json-schemaのようなライブラリを使うとより正確
+            // ここでは簡略化のため、zodのdescriptionをそのまま利用
+            arguments_schema: tool.inputSchema.description,
+        }));
+
+        // JSON-RPC形式で成功レスポンスを返す
+        res.status(200).json({
+            jsonrpc: "2.0",
+            result: {
+                tools: tools,
+            },
+            // GETリクエストにはIDがないためnullを設定
+            id: null,
+        });
+    } catch (error) {
+        console.error("Error handling GET request:", error);
+        res.status(500).json({
+            jsonrpc: "2.0",
+            error: {
+                code: -32603,
+                message: "Internal server error during tool discovery.",
+            },
+            id: null,
+        });
     }
 });
+
+
+// DELETEリクエストも互換性のために405を返す
+app.delete("/mcp", async (req, res) => {
+    console.log("Received DELETE MCP request");
+    res.status(405).json({
+        jsonrpc: "2.0",
+        error: {
+            code: -32601, // Method not found
+            message: "Method not allowed.",
+        },
+        id: null,
+    });
+});
+
+
+// 4. サーバーのセットアップと起動
+const setupAndStartServer = async () => {
+    try {
+        // MCPサーバーとトランスポートを接続
+        await mcpServer.connect(transport);
+
+        // Expressサーバーを起動
+        const httpServer = app.listen(port, host, () => {
+            console.log(`MCP Server is running on http://${host}:${port}/mcp`);
+            // 'getTools'の代わりに内部プロパティ'_registeredTools'のキー一覧を表示
+            const registeredTools = (mcpServer as any)['_registeredTools'] || {};
+            console.log("Registered tools:", Object.keys(registeredTools));
+        });
+
+        // Graceful shutdown
+        const shutdown = async () => {
+            console.log("Shutting down server...");
+            httpServer.close(async () => {
+                try {
+                    console.log("Closing transport...");
+                    await transport.close();
+                    await mcpServer.close();
+                    console.log("Server shutdown complete.");
+                    process.exit(0);
+                } catch (error) {
+                    console.error("Error during shutdown:", error);
+                    process.exit(1);
+                }
+            });
+        };
+
+        process.on("SIGINT", shutdown);
+        process.on("SIGTERM", shutdown);
+
+    } catch (err) {
+        console.error("Error setting up server:", err);
+        process.exit(1);
+    }
+};
+
+setupAndStartServer();
