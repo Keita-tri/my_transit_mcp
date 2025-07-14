@@ -37,6 +37,9 @@
         "test:watch": "vitest",
         "prepublishOnly": "npm run build"
     },
+    "engines": {
+        "node": ">=20.0.0"
+    },
     "devDependencies": {
         "@types/express": "^4.17.21",
         "@types/node": "^24.0.13",
@@ -50,6 +53,7 @@
         "cheerio": "^1.1.0",
         "express": "^4.21.2",
         "gpt-tokenizer": "^3.0.1",
+        "tiktoken": "^1.0.14",
         "zod": "^3.25.76"
     }
 }
